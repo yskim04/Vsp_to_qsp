@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>vsp_to_qsp</name>
+  <version>0.1.0</version>
+  <description>ROS2 node converting PX4 velocity trajectory setpoints to attitude setpoints.</description>
+  <maintainer email="yskim@example.com">yskim</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <build_depend>eigen3_cmake_module</build_depend>
+  <depend>rclcpp</depend>
+  <depend>px4_msgs</depend>
+  <depend>eigen</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
