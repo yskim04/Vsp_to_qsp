@@ -599,7 +599,7 @@ private:
     return clampScalar(dt_sec, kMinDtSec, kMaxDtSec);
   }
 
-  uint64_t nowMicros() const
+  uint64_t nowMicros()
   {
     return static_cast<uint64_t>(get_clock()->now().nanoseconds() / 1000ULL);
   }
