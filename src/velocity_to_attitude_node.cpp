@@ -18,6 +18,7 @@
 #include <px4_msgs/msg/vehicle_attitude_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_land_detected.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
+#include <px4_msgs/msg/vehicle_status.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 namespace
@@ -412,6 +413,7 @@ private:
     std::string trajectory_setpoint_topic{"/fmu/in/trajectory_setpoint"};
     std::string vehicle_local_position_topic{"/fmu/out/vehicle_local_position"};
     std::string vehicle_land_detected_topic{"/fmu/out/vehicle_land_detected"};
+    std::string vehicle_status_topic{"/fmu/out/vehicle_status"};
     std::string vehicle_attitude_setpoint_topic{"/fmu/in/vehicle_attitude_setpoint"};
     std::string offboard_control_mode_topic{"/fmu/in/offboard_control_mode"};
   };
@@ -443,6 +445,8 @@ private:
       declare_parameter("vehicle_local_position_topic", params_.vehicle_local_position_topic);
     params_.vehicle_land_detected_topic =
       declare_parameter("vehicle_land_detected_topic", params_.vehicle_land_detected_topic);
+    params_.vehicle_status_topic =
+      declare_parameter("vehicle_status_topic", params_.vehicle_status_topic);
     params_.vehicle_attitude_setpoint_topic =
       declare_parameter("vehicle_attitude_setpoint_topic", params_.vehicle_attitude_setpoint_topic);
     params_.offboard_control_mode_topic =
@@ -468,9 +472,11 @@ private:
   {
     rclcpp::QoS sensor_qos(rclcpp::KeepLast(10));
     sensor_qos.best_effort();
+    sensor_qos.transient_local();
 
     rclcpp::QoS control_qos(rclcpp::KeepLast(10));
     control_qos.best_effort();
+    control_qos.transient_local();
 
     trajectory_setpoint_sub_ = create_subscription<px4_msgs::msg::TrajectorySetpoint>(
       params_.trajectory_setpoint_topic, sensor_qos,
@@ -481,6 +487,9 @@ private:
     land_detected_sub_ = create_subscription<px4_msgs::msg::VehicleLandDetected>(
       params_.vehicle_land_detected_topic, sensor_qos,
       std::bind(&OffboardVelocityToAttitudeNode::onVehicleLandDetected, this, std::placeholders::_1));
+    vehicle_status_sub_ = create_subscription<px4_msgs::msg::VehicleStatus>(
+      params_.vehicle_status_topic, sensor_qos,
+      std::bind(&OffboardVelocityToAttitudeNode::onVehicleStatus, this, std::placeholders::_1));
 
     attitude_setpoint_pub_ = create_publisher<px4_msgs::msg::VehicleAttitudeSetpoint>(
       params_.vehicle_attitude_setpoint_topic, control_qos);
@@ -512,6 +521,15 @@ private:
   {
     landed_ = msg->landed;
     if (landed_) {
+      pid_.reset();
+    }
+  }
+
+  void onVehicleStatus(const px4_msgs::msg::VehicleStatus::SharedPtr msg)
+  {
+    has_vehicle_status_ = true;
+    armed_ = msg->arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
+    if (!armed_) {
       pid_.reset();
     }
   }
@@ -636,6 +654,13 @@ private:
     attitude_setpoint_pub_->publish(msg);
   }
 
+  void publishNeutralAttitudeSetpoint(const uint64_t timestamp_us, const float yaw_current)
+  {
+    AttitudeCommand neutral_cmd = thrust_to_attitude_.compute(
+      Eigen::Vector3f(0.0F, 0.0F, -params_.hover_thrust), yaw_current, yaw_current);
+    publishVehicleAttitudeSetpoint(timestamp_us, neutral_cmd, 0.0F);
+  }
+
   void onTimer()
   {
     if (!has_local_position_ || !has_trajectory_setpoint_) {
@@ -661,6 +686,20 @@ private:
 
     const Eigen::Vector3f vel(
       latest_local_position_.vx, latest_local_position_.vy, latest_local_position_.vz);
+    const float yaw_current = isFinite(latest_local_position_.heading) ? latest_local_position_.heading : 0.0F;
+    const uint64_t timestamp_us = latest_local_position_.timestamp > 0U ?
+      latest_local_position_.timestamp : nowMicros();
+
+    if (has_vehicle_status_ && !armed_) {
+      pid_.reset();
+      previous_velocity_ = vel;
+      has_previous_velocity_ = true;
+      last_local_position_timestamp_us_ = latest_local_position_.timestamp;
+      publishOffboardControlMode(timestamp_us);
+      publishNeutralAttitudeSetpoint(timestamp_us, yaw_current);
+      return;
+    }
+
     const float dt_sec = computeDtSec();
     Eigen::Vector3f fallback_acceleration = Eigen::Vector3f::Zero();
     if (has_previous_velocity_ && dt_sec > kEpsilon) {
@@ -671,7 +710,6 @@ private:
     const Eigen::Vector3f pos = extractMeasuredPosition(latest_local_position_);
     previous_velocity_ = vel;
     has_previous_velocity_ = true;
-    const float yaw_current = isFinite(latest_local_position_.heading) ? latest_local_position_.heading : 0.0F;
 
     if (!traj_stale) {
       const InputValidationResult validation = validateInputSetpoint(
@@ -740,8 +778,6 @@ private:
     }
 
     const AttitudeCommand attitude_cmd = thrust_to_attitude_.compute(thr_sp, yaw_sp, yaw_current);
-    const uint64_t timestamp_us = latest_local_position_.timestamp > 0U ?
-      latest_local_position_.timestamp : nowMicros();
     publishOffboardControlMode(timestamp_us);
     publishVehicleAttitudeSetpoint(timestamp_us, attitude_cmd, yawspeed_sp);
   }
@@ -757,6 +793,8 @@ private:
   bool has_trajectory_setpoint_{false};
   bool has_local_position_{false};
   bool landed_{false};
+  bool has_vehicle_status_{false};
+  bool armed_{false};
 
   px4_msgs::msg::TrajectorySetpoint latest_trajectory_setpoint_{};
   px4_msgs::msg::VehicleLocalPosition latest_local_position_{};
@@ -768,6 +806,7 @@ private:
   rclcpp::Subscription<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_position_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLandDetected>::SharedPtr land_detected_sub_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_status_sub_;
 
   rclcpp::Publisher<px4_msgs::msg::VehicleAttitudeSetpoint>::SharedPtr attitude_setpoint_pub_;
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
